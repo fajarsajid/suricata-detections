@@ -1,0 +1,147 @@
+# =============================================================================
+# CVE-2021-44228 — Log4Shell Detection Rules
+# Author: Fajar Sajid
+# Reference: https://nvd.nist.gov/vuln/detail/CVE-2021-44228
+#            https://www.lunasec.io/docs/blog/log4j-zero-day/
+#            https://attack.mitre.org/techniques/T1190/
+# MITRE ATT&CK: T1190 (Exploit Public-Facing Application)
+#               T1059 (Command and Scripting Interpreter — post-exploitation)
+# =============================================================================
+# Trade-off philosophy:
+#   These rules prioritize HIGH RECALL over precision on rules 1-4 (catch all
+#   variants, accept some FPs from security scanners). Rule 5 is high-precision.
+#   The threshold keyword on rules 1-2 limits alert storms from mass scanning.
+#   Benign scanner suppression should be handled at the sensor/tag level
+#   (e.g. GreyNoise known-scanner lists) rather than in rule logic.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# RULE 1: Core JNDI lookup in HTTP headers (broadest coverage)
+#   Catches: Basic exploitation attempts via any HTTP header
+#   FP risk: LOW — ${jndi: is not present in legitimate HTTP traffic
+#   Evasion: Obfuscated variants (see rules 3-4)
+#   Threshold: 1 alert per source per 60s to suppress scanner storms
+# -----------------------------------------------------------------------------
+alert http any any -> $HTTP_SERVERS any (
+    msg:"ET EXPLOIT CVE-2021-44228 Log4Shell JNDI Lookup in HTTP Header";
+    flow:established,to_server;
+    http.header;
+    content:"${jndi:";
+    fast_pattern;
+    classtype:attempted-admin;
+    reference:cve,2021-44228;
+    reference:url,www.lunasec.io/docs/blog/log4j-zero-day/;
+    metadata:affected_product Apache_Log4j2,
+              attack_target Server,
+              confidence High,
+              signature_severity Major,
+              mitre_tactic_id TA0001,
+              mitre_technique_id T1190;
+    threshold:type limit, track by_src, count 1, seconds 60;
+    sid:9100001; rev:3;
+)
+
+
+# -----------------------------------------------------------------------------
+# RULE 2: JNDI lookup in HTTP URI/request body
+#   Catches: POST body injection and URI-based attempts
+#   FP risk: LOW
+#   Note: Separate rule from Rule 1 because http.header and http.uri/body
+#         cannot be combined in a single Suricata sticky buffer rule cleanly
+# -----------------------------------------------------------------------------
+alert http any any -> $HTTP_SERVERS any (
+    msg:"ET EXPLOIT CVE-2021-44228 Log4Shell JNDI Lookup in HTTP URI or Body";
+    flow:established,to_server;
+    http.uri;
+    content:"${jndi:";
+    fast_pattern;
+    classtype:attempted-admin;
+    reference:cve,2021-44228;
+    metadata:affected_product Apache_Log4j2,
+              attack_target Server,
+              confidence High,
+              signature_severity Major,
+              mitre_tactic_id TA0001,
+              mitre_technique_id T1190;
+    threshold:type limit, track by_src, count 1, seconds 60;
+    sid:9100002; rev:2;
+)
+
+
+# -----------------------------------------------------------------------------
+# RULE 3: Obfuscated variant — nested expression bypass
+#   Catches: ${${lower:j}ndi:}, ${${::-j}${::-n}${::-d}${::-i}:} patterns
+#   Rationale: Attackers quickly moved to obfuscated forms to bypass WAFs
+#   FP risk: VERY LOW — nested ${ sequences are not legitimate HTTP content
+#   Reference: https://github.com/back2root/log4shell-rex (evasion patterns)
+# -----------------------------------------------------------------------------
+alert http any any -> $HTTP_SERVERS any (
+    msg:"ET EXPLOIT CVE-2021-44228 Log4Shell Obfuscated JNDI Nested Expression";
+    flow:established,to_server;
+    http.header;
+    content:"${${";
+    fast_pattern;
+    pcre:"/\$\{(\$\{[^}]*\}|[a-z:-]+:){1,10}(ldap|rmi|dns|iiop|corba|nds|nis)/i";
+    classtype:attempted-admin;
+    reference:cve,2021-44228;
+    metadata:affected_product Apache_Log4j2,
+              attack_target Server,
+              confidence High,
+              signature_severity Critical,
+              mitre_tactic_id TA0001,
+              mitre_technique_id T1190;
+    sid:9100003; rev:4;
+)
+
+
+# -----------------------------------------------------------------------------
+# RULE 4: Protocol variants — LDAP/RMI/DNS callback detection
+#   Catches: jndi:ldap://, jndi:rmi://, jndi:dns:// callback destinations
+#   Rationale: Even without ${jndi: prefix intact, protocol strings indicate
+#              exploitation — useful for catching partially-decoded payloads
+#   FP risk: LOW — these protocol strings are not in normal HTTP headers
+# -----------------------------------------------------------------------------
+alert http any any -> $HTTP_SERVERS any (
+    msg:"ET EXPLOIT CVE-2021-44228 Log4Shell JNDI Protocol Callback String";
+    flow:established,to_server;
+    http.header;
+    pcre:"/jndi:(ldap|ldaps|rmi|dns|iiop|corba|nds|nis):\/\//i";
+    classtype:attempted-admin;
+    reference:cve,2021-44228;
+    metadata:affected_product Apache_Log4j2,
+              attack_target Server,
+              confidence High,
+              signature_severity Major,
+              mitre_tactic_id TA0001,
+              mitre_technique_id T1190;
+    sid:9100004; rev:2;
+)
+
+
+# -----------------------------------------------------------------------------
+# RULE 5: Outbound LDAP callback — post-exploitation confirmation
+#   Catches: Successful exploitation — server making outbound LDAP connection
+#            to attacker-controlled infrastructure
+#   FP risk: MEDIUM — legitimate LDAP outbound exists (AD, directory services)
+#   Trade-off: HIGH PRECISION signal. A match here means exploitation likely
+#              succeeded. Worth the FP cost; correlate with Rules 1-4 for
+#              confirmation. Suppression list for known-good LDAP servers
+#              should be maintained separately.
+#   MITRE: T1190 initial access confirmed, potential T1071.002 (App Layer C2)
+# -----------------------------------------------------------------------------
+alert tcp $HTTP_SERVERS any -> ![$HTTP_SERVERS,$DNS_SERVERS] 389 (
+    msg:"ET EXPLOIT CVE-2021-44228 Log4Shell Outbound LDAP Callback — Possible Successful Exploitation";
+    flow:established,to_server;
+    flags:S;
+    classtype:trojan-activity;
+    reference:cve,2021-44228;
+    metadata:affected_product Apache_Log4j2,
+              attack_target Server,
+              confidence Medium,
+              signature_severity Critical,
+              mitre_tactic_id TA0001,
+              mitre_technique_id T1190,
+              analyst_note "Correlate with sid:9100001-9100004 on same src IP for high-confidence verdict";
+    sid:9100005; rev:3;
+)

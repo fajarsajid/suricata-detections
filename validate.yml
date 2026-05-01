@@ -1,0 +1,37 @@
+name: Validate Detection Rules
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    name: Rule validation
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Suricata
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y suricata
+
+      - name: Generate test pcaps
+        run: python tests/generate_test_pcaps.py
+
+      - name: Validate rules against pcaps
+        run: python tests/test_rules.py --ci
+
+      - name: Verify rule syntax
+        run: |
+          suricata -T -S rules/log4shell.rules -l /tmp/suricata-syntax-check
+          echo "Rule syntax OK"
